@@ -18,6 +18,7 @@ module(...)
 local VERSION = '0.2.0'
 
 local FDFS_PROTO_PKG_LEN_SIZE = 8
+local FDFS_IPADDR_SIZE = 16
 local FDFS_FILE_EXT_NAME_MAX_LEN = 6
 local FDFS_FILE_PREFIX_MAX_LEN = 16
 local FDFS_PROTO_CMD_QUIT = 82
@@ -173,6 +174,29 @@ function read_download_result_cb(self, cb)
         cb(data)
     end
     return true
+end
+
+function read_fileinfo_result(self)
+    local sock = self.sock
+    if not sock then
+        return nil, "not initialized"
+    end
+    local hdr, err = read_fdfs_header(sock)
+    if not hdr then
+        return nil, "read storage header error:" .. err
+    end
+    if hdr.status == 0 then
+        local bodylen = 3 * FDFS_PROTO_PKG_LEN_SIZE + FDFS_IPADDR_SIZE
+        local data, err, partial = sock:receive(bodylen)
+        local info = {}
+        info.file_size = utils.read_int(data, 1)
+        info.create_timestamp = utils.read_int(data, FDFS_PROTO_PKG_LEN_SIZE + 1)
+        info.crc32 = utils.read_int(data, 2 * FDFS_PROTO_PKG_LEN_SIZE + 1)
+        info.source_ip_addr = strip_string(data:sub(3 * FDFS_PROTO_PKG_LEN_SIZE + 1))
+        return info
+    else
+        return nil, "status:" .. hdr.status
+    end
 end
 
 -- build upload method
@@ -559,6 +583,34 @@ function modify_by_sock1(self, fileid, sock, size, offset)
     end
     return self:modify_by_sock(file_name, sock, size, offset)
 end
+
+-- build file info request
+local function build_fileinfo_request(fileid)
+    local group_name, file_name, err = split_fileid(fileid)
+    if not group_name or not file_name then
+        return nil, "fileid error:" .. err
+    end
+    local req = {}
+    table.insert(req, int2buf(16 + string.len(file_name)))
+    table.insert(req, string.char(STORAGE_PROTO_CMD_QUERY_FILE_INFO))
+    table.insert(req, "\00")
+    table.insert(req, fix_string(group_name, 16))
+    table.insert(req, file_name)
+    return req
+end
+
+function query_file_info(self, fileid)
+    -- build request
+    local req = build_fileinfo_request(fileid)
+    table.insert(req, buff)
+    -- send
+    local ok, err = self:send_request(req)
+    if not ok then
+        return nil, err
+    end
+    return self:read_fileinfo_result()
+end
+
 -- set variavle method
 function set_timeout(self, timeout)
     local sock = self.sock
